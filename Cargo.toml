@@ -1,0 +1,16 @@
+[package]
+name = "aetherdb"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.60", features = ["derive"] }
+tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread"] }
+anyhow = "1.0.102"
+datafusion = "52.2.0"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = [
+    "env-filter",
+    "fmt",
+    "json",
+] }
