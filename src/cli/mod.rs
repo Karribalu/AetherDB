@@ -1,76 +1,29 @@
-use std::ffi::OsString;
-use std::path::PathBuf;
+//! CLI entry point: argument parsing and command dispatch.
+//!
+//! Commands:
+//! - `aetherdb serve` — start the HTTP server.
+//! - `aetherdb info` — print version and config.
+//!
+//! The CLI has no storage, index, or query logic. It delegates immediately
+//! to the engine or server module.
 
-use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::core::config::{AppConfig, LogFormat};
-use crate::core::telemetry;
-use crate::engine::Engine;
-
-#[derive(Debug, Parser)]
-#[command(name = "aetherdb", version, about = "AetherDB Day 1 foundation")]
-struct Cli {
-    #[arg(long, default_value = ".aetherdb")]
-    data_dir: PathBuf,
-
-    #[arg(long, value_enum, default_value_t = LogFormat::Text)]
-    log_format: LogFormat,
-
+#[derive(Parser)]
+#[command(name = "aetherdb", version, about = "Text and vector search database")]
+pub struct Cli {
     #[command(subcommand)]
-    command: Command,
+    pub command: Command,
 }
 
-#[derive(Debug, Subcommand)]
-enum Command {
-    Start,
+#[derive(Subcommand)]
+pub enum Command {
+    /// Start the AetherDB HTTP server.
+    Serve {
+        /// Path to a JSON config file.
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+    /// Print version and effective configuration.
     Info,
-}
-
-pub fn run<I, T>(args: I) -> Result<()>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<OsString> + Clone,
-{
-    let cli = Cli::parse_from(args);
-    let config = AppConfig::new(cli.data_dir, cli.log_format);
-
-    telemetry::init(config.log_format)?;
-
-    let engine = Engine::open(config)?;
-
-    match cli.command {
-        Command::Start => {
-            let paths = engine.layout();
-            println!("AetherDB v{}", env!("CARGO_PKG_VERSION"));
-            println!("status: initialized");
-            println!("data dir: {}", paths.root.display());
-            println!("catalog dir: {}", paths.catalog.display());
-            println!("wal dir: {}", paths.wal.display());
-            println!("snapshots dir: {}", paths.snapshots.display());
-        }
-        Command::Info => {
-            println!("{}", engine.describe());
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn clap_parses_start_command() {
-        let cli = Cli::parse_from(["aetherdb", "start"]);
-        assert!(matches!(cli.command, Command::Start));
-    }
-
-    #[test]
-    fn clap_parses_custom_data_dir() {
-        let cli = Cli::parse_from(["aetherdb", "--data-dir", "./tmp-db", "info"]);
-        assert_eq!(cli.data_dir, PathBuf::from("./tmp-db"));
-        assert!(matches!(cli.command, Command::Info));
-    }
 }

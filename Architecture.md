@@ -2,283 +2,263 @@
 
 ## Purpose
 
-This document is the canonical architecture summary for AetherDB at its current stage.
+This document is the canonical architecture reference for AetherDB.
 
-It exists to make the system's invariants, build order, storage authority, and scope boundaries explicit in one place. If this file and the code disagree, stop and reconcile them before expanding the system.
+It defines the system model, module boundaries, build order, and invariants. If this file and the code disagree, reconcile them before expanding the system.
 
-## Current State
+---
 
-AetherDB is in foundation mode.
+## What AetherDB Is
 
-What exists today:
+AetherDB is a **text and vector search database** built from scratch in Rust.
 
-1. A Rust binary with a minimal CLI surface.
-2. Initialization of a local data directory layout.
-3. The expected storage directories beneath the data root:
-   - `catalog/`
-   - `wal/`
-   - `snapshots/`
+Core design targets:
 
-What does not exist yet:
+1. **Object storage as primary persistence** — all segment data is durable in object storage (S3-compatible). There is no WAL on local disk. Object storage is the source of truth.
+2. **NVMe-backed local cache** — a local NVMe tier caches hot segments. Cache is evictable and reconstructible from object storage at any time. Cache loss is not data loss.
+3. **Unlimited scale** — because object storage is the primary tier, the dataset size is bounded only by object storage capacity, not local disk.
+4. **Dual query surface** — SQL queries and JSON-based filter/search queries over the same underlying segments.
+5. **Multiple index types** — inverted index for full-text search, HNSW for vector similarity, BKD-tree for numeric range, and bitmap indexes for low-cardinality fields. All built from scratch in Rust, inspired by Lucene's index designs but not using Lucene.
+6. **Immutable segment architecture** — data is written as immutable segments. Mutations produce new segments. Segments are merged in the background. This is the same model used by Lucene, RocksDB, and turbopuffer.
 
-1. Durable WAL records.
-2. Snapshot creation and recovery.
-3. Persistent table or catalog state.
-4. SQL execution.
-5. Vector indexing or search.
-6. Networking.
-7. GPU or CXL-aware execution paths.
+This database is **not** a general-purpose OLTP database. It targets analytical reads, full-text search, and vector similarity workloads.
 
-This gap is intentional. The repository is being built in the order most likely to produce a durable system rather than a fragile demo.
-
-## Mission
-
-Build AetherDB as a durable, AI-native database without sacrificing recoverability for velocity.
-
-The system does not earn the right to call itself a database by parsing SQL, exposing AI features, or demonstrating accelerated execution. It earns that right by surviving crashes, preserving invariants, and recovering deterministically.
-
-## Design Principles
-
-The architecture follows Tiger Style rules:
-
-1. Correctness before capability.
-2. Durability before performance.
-3. Simplicity before optimization.
-4. Determinism before convenience.
-5. Explicit invariants before feature growth.
-6. Reference implementations before accelerated implementations.
-7. Measurable behavior before performance or marketing claims.
-
-These are architectural constraints, not preferences.
-
-## Implementation Order
-
-All work should follow this sequence:
-
-1. Storage invariants.
-2. Recovery semantics.
-3. Data model correctness.
-4. Query execution correctness.
-5. Concurrency correctness.
-6. Performance optimization.
-7. Hardware-aware features such as GPU and CXL integration.
-
-If a proposed feature tries to skip this order, it is likely arriving too early.
+---
 
 ## System Model
 
-The intended system shape is a single-node database with a staged storage hierarchy and explicit recovery semantics.
+```
+Client
+  │
+  ▼
+Query Layer  ──────────────────────────────────────────────────┐
+  │  SQL parser + logical planner + JSON query planner         │
+  │                                                            │
+  ▼                                                            │
+Execution Engine                                               │
+  │  Segment scanner, index reader, merge coordinator          │
+  │                                                            │
+  ▼                                                            │
+Index Layer                                                    │
+  │  Inverted index, HNSW (vector), BKD tree (numeric),        │
+  │  Bitmap index (low-cardinality)                            │
+  │                                                            │
+  ▼                                                            │
+Segment Store                                                  │
+  │  Immutable columnar segments (custom binary format)        │
+  │                                                            │
+  ├──► NVMe Cache Tier   (hot segments, evictable)             │
+  │                                                            │
+  └──► Object Storage    (all segments, source of truth)       │
+```
 
-The architecture is organized around three ideas:
+---
 
-1. The WAL is the authority for committed state between snapshots.
-2. Recovery must be deterministic and repeatable.
-3. Higher-level features such as SQL, vector search, networking, and acceleration are downstream of a correct storage core.
+## Storage Model
 
-## Source Of Truth
+### Immutable Segments
 
-For the MVP, the write-ahead log is the source of truth between snapshots.
+Every write operation produces a new immutable segment. A segment contains:
 
-Rules:
+1. Columnar row data encoded in a compact binary format (defined by AetherDB, not Parquet or Arrow — those may be used as read targets later).
+2. An inverted index for text fields.
+3. An HNSW graph for vector fields.
+4. A BKD tree for numeric and geo fields.
+5. A bitmap index for low-cardinality fields such as labels and enums.
+6. Metadata: segment ID, schema fingerprint, min/max field values, row count, byte size, object storage key.
 
-1. A write is not committed until its WAL record is durable.
-2. A snapshot is an optimization, not the primary authority.
-3. Recovery always means loading the latest valid snapshot and replaying WAL entries after that boundary.
-4. If a snapshot conflicts with a valid WAL tail, the WAL wins.
+A segment is immutable once written. It is never modified in place.
 
-This means the system is not defined by "WAL or snapshot" as competing authorities. The authority model is:
+### Object Storage as Source of Truth
 
-1. Snapshot for recovery acceleration.
-2. WAL for committed truth between snapshot boundaries.
+1. All committed segments must be durably written to object storage before a write is acknowledged.
+2. NVMe local cache holds warm copies of recent or frequently accessed segments.
+3. Cache eviction is safe at any time. On cache miss, the segment is fetched from object storage.
+4. A catalog file in object storage tracks the currently active set of segment keys and schema state.
+5. The catalog is updated atomically using object storage conditional writes (compare-and-swap on version/etag where available, otherwise append-only catalog log).
 
-## Storage Tiers
+### Segment Lifecycle
 
-The tier model is intentional but still early.
+```
+ingest → write buffer → flush → segment (object storage + optional NVMe cache)
+                                        │
+                          background merge → larger segment
+                                        │
+                          soft delete old segments after merge is verified
+```
 
-### Hot Tier
+### NVMe Cache Tier
 
-The hot tier is the in-memory working state used by the engine for active operations.
+1. Segments are cached in full on local NVMe on first access or at write time.
+2. The cache index maps segment ID → local path + size.
+3. Eviction policy: LRU by segment last-access time, capped by configured byte budget.
+4. Cache is always reconstructible from object storage. Cache corruption or loss is handled by fetching the segment again.
 
-Current expectation:
+---
 
-1. Use simple reference structures.
-2. Favor clarity and correctness over specialized layouts.
-3. Do not optimize hot-tier structures in ways that obscure persistence semantics.
+## Index Types
 
-### Warm Tier
+All indexes are built from scratch in Rust. No Lucene, Tantivy, or FAISS dependency.
 
-The warm tier is memory-mapped persistence intended to simulate, and later possibly use, CXL-like characteristics.
+### Inverted Index (Full-Text)
 
-Current constraint:
+- Tokenize text fields into terms.
+- Build term → postings list (sorted doc IDs + term frequencies).
+- Support BM25 scoring.
+- Store per-segment on object storage alongside segment data.
+- Postings lists use delta-encoding and variable-length integer encoding.
+- Support phrase queries, prefix queries, and boolean queries.
 
-1. Warm-tier design must not bypass WAL and recovery correctness.
-2. No spill policies, migration heuristics, or placement logic should land before the single-tier reference path is correct.
+### HNSW (Vector Similarity)
 
-### Cold Tier
+- Hierarchical Navigable Small World graph for approximate nearest neighbor search.
+- Per-segment HNSW graph built at flush time from the vector column.
+- Support cosine, dot product, and Euclidean distance metrics.
+- Results from per-segment HNSW are merged and re-ranked at query time.
+- CPU baseline first; no GPU acceleration until correctness is proven.
 
-The cold tier is durable snapshot state on disk.
+### BKD Tree (Numeric / Range)
 
-Current expectation:
+- Multi-dimensional k-d tree variant for numeric range and spatial queries.
+- Used for integer, float, timestamp, and geo-coordinate fields.
+- Per-segment block KD-tree stored in compact binary form.
 
-1. Snapshots represent materialized state at a known boundary.
-2. A partial or invalid snapshot must never be accepted as current state.
-3. Snapshot format and validation rules must be explicit before snapshotting is considered complete.
+### Bitmap Index (Low-Cardinality)
 
-## Write Path
+- Roaring bitmap per value per field for low-cardinality fields (enums, tags, boolean).
+- Direct AND/OR operations for filter queries.
 
-The repository has defined the commit rule even though the full write path is not implemented yet.
+---
 
-The intended reference write path is:
+## Query Layer
 
-1. Accept and validate the logical write request.
-2. Encode a WAL record using explicit framing and validation metadata.
-3. Append the WAL record.
-4. Durably flush the WAL record.
-5. Only then acknowledge commit.
-6. Reflect the committed change in in-memory working state.
-7. Materialize snapshots later as a separate recovery optimization.
+### SQL Query Surface
 
-Required invariant:
+- Use `sqlparser` crate to parse SQL into an AST.
+- Build a custom logical planner that maps SQL constructs onto segment operations.
+- The SQL planner does not replace the storage model; it maps onto it.
+- Supported initially: `SELECT`, `WHERE`, `ORDER BY`, `LIMIT`, `OFFSET`.
+- Full-text predicates via `MATCH()` or `WHERE text_field ~~ 'query'` syntax.
+- Vector predicates via `ORDER BY vector_distance(field, [...]) LIMIT k`.
 
-An acknowledged write must exist durably in the WAL.
+### JSON Query Surface
 
-Anything that acknowledges a write before WAL durability violates the architecture.
+- A JSON-based filter and search API similar to turbopuffer's query format.
+- Queries are plain JSON objects describing filter conditions, vector search, and field projections.
+- The JSON planner operates on the same logical plan representation as the SQL planner.
+- Both surfaces share the same execution engine.
 
-## Crash Semantics
+### Execution
 
-Persistence work must preserve these behaviors:
+1. Parse query (SQL AST or JSON plan).
+2. Resolve schema and identify relevant segments.
+3. Per-segment: apply index predicates (inverted, BKD, bitmap) to get candidate doc IDs.
+4. Per-segment: fetch and decode matching rows from columnar data.
+5. Merge results across segments.
+6. Apply ranking, scoring, and sorting.
+7. Return projected result set.
 
-1. Partial WAL records are ignored or rejected through explicit framing and validation.
-2. Partial snapshots are never accepted as valid current state.
-3. Empty storage boots as a clean database.
-4. Recovery is deterministic and repeatable.
-5. Restart behavior is testable without manual inspection.
-
-Operationally, this implies:
-
-1. If a crash happens before WAL durability, the write is not committed.
-2. If a crash happens after WAL durability but before snapshotting, recovery must replay the WAL.
-3. Truncated or corrupt WAL tails must not be interpreted as valid committed state.
-
-## Recovery Path
-
-Startup recovery should follow a fixed sequence:
-
-1. Detect whether storage is empty.
-2. If empty, boot cleanly with an empty database state.
-3. If a snapshot exists, load the latest valid snapshot.
-4. Determine the replay boundary from that snapshot.
-5. Replay WAL records after the snapshot boundary.
-6. Reject or ignore invalid partial WAL records according to the WAL validation rules.
-7. Publish the recovered state only after replay completes successfully.
-
-Recovery must be deterministic. Running recovery multiple times over the same on-disk state must produce the same result.
+---
 
 ## Module Boundaries
 
-The current module responsibilities are:
+| Module    | Responsibility                                                     |
+| --------- | ------------------------------------------------------------------ |
+| `cli`     | Process entrypoints, argument parsing, command dispatch            |
+| `core`    | Error types, configuration, telemetry, shared primitives           |
+| `catalog` | Schema registry, segment manifest, namespace metadata              |
+| `storage` | Object storage client abstraction, NVMe cache, segment read/write  |
+| `index`   | Inverted index, HNSW, BKD tree, bitmap index implementations       |
+| `codec`   | Binary encoding/decoding for segments and index structures         |
+| `query`   | SQL planner, JSON planner, logical plan types, optimizer           |
+| `engine`  | Query execution, segment scanner, result merger, write coordinator |
+| `server`  | HTTP/gRPC server surface (post-correctness milestone)              |
 
-1. `cli`: process entrypoints, argument parsing, and command dispatch.
-2. `core`: shared configuration, error handling conventions, telemetry, and cross-cutting runtime utilities.
-3. `engine`: orchestration layer that composes storage, query, and runtime services.
-4. `storage`: filesystem layout, WAL, snapshots, tier management, and persistence semantics.
+Module boundary rules:
 
-Boundary rules:
+1. `cli` has no storage, index, or query logic.
+2. `storage` has no query or index logic. It provides byte-level read/write over segments.
+3. `index` reads from `storage` and `codec`. It does not plan queries.
+4. `query` does not touch storage directly. It produces logical plans consumed by `engine`.
+5. `engine` is the only layer allowed to coordinate across `storage`, `index`, and `query`.
+6. `server` wraps `engine`. It has no direct storage or index access.
 
-1. `cli` must not embed storage logic.
-2. `storage` must not depend on CLI concerns.
-3. `engine` coordinates; it must not become a dumping ground for unrelated logic.
-4. New modules should exist only when they reduce coupling or clarify responsibility.
+---
 
-## Feature Admission Rules
+## Build Order
 
-No new feature should land unless its architectural prerequisites are satisfied.
+This is the mandatory sequence. Do not jump ahead.
 
-### Persistence Features
+1. **Codec** — define the binary segment format and encoding primitives.
+2. **Storage** — local file I/O for segments, then object storage client abstraction.
+3. **NVMe cache** — cache layer over storage with eviction policy.
+4. **Catalog** — segment manifest and schema registry backed by object storage.
+5. **Index: Inverted Index** — per-segment full-text index.
+6. **Index: BKD Tree** — per-segment numeric range index.
+7. **Index: Bitmap** — per-segment bitmap index for low-cardinality fields.
+8. **Index: HNSW** — per-segment vector index.
+9. **Engine: Write path** — ingest, flush, segment creation.
+10. **Engine: Read path** — segment scan, index lookup, merge, rank.
+11. **Query: SQL planner** — SQL → logical plan.
+12. **Query: JSON planner** — JSON filter → logical plan.
+13. **Merge coordinator** — background segment merging.
+14. **Server** — HTTP API surface.
 
-Before merging WAL, snapshot, catalog, or spill behavior:
+---
 
-1. Define the failure model.
-2. Define the on-disk format or record contract.
-3. Add restart tests.
-4. Add corruption or truncation tests where applicable.
-5. State which component is authoritative during recovery.
+## Correctness Rules
 
-### Query Features
+1. A write is not acknowledged until the segment is durable in object storage.
+2. A segment on NVMe cache that cannot be verified against the catalog is not used.
+3. Partial segment writes are discarded, not partially read.
+4. The catalog is the authority for which segments exist. Local cache is subordinate.
+5. Index structures within a segment must be byte-reproducible from the same input data.
+6. HNSW results must be verified against a brute-force CPU baseline before the index is trusted.
 
-Before expanding SQL support:
-
-1. There must be a simpler in-process reference path when practical.
-2. Semantics must be defined before optimization.
-3. Query integration must not obscure storage invariants.
-
-### Vector Features
-
-Before ANN, GPU, or other acceleration paths:
-
-1. Implement a correct CPU baseline.
-2. Lock down vector storage semantics.
-3. Define distance metric behavior exactly.
-4. Prove result correctness against the baseline.
-
-### AI Features
-
-Embedding or inference APIs are not core until storage and recovery are stable.
+---
 
 ## Testing Requirements
 
-Tests are part of the architecture.
+1. No codec without round-trip serialization tests.
+2. No storage layer without write-then-read verification and simulated fetch-after-eviction tests.
+3. No index structure without correctness comparison to a naive reference implementation.
+4. No HNSW without recall-at-k measurement against brute force.
+5. No query planner without plan equivalence tests.
+6. No write path without durability tests (segment visible in object storage before ack).
+7. Benchmarks only after correctness is stable.
 
-Minimum rules:
+---
 
-1. No persistence logic without restart tests.
-2. No crash-sensitive path without truncation or partial-write tests.
-3. No optimization without comparison to a correct baseline.
-4. No storage tier transition without round-trip verification.
-5. No concurrency feature without race-oriented validation.
+## Explicit Non-Goals for v0.1
 
-Preferred progression:
+1. Distributed multi-node coordination.
+2. OLTP transactions or row-level locking.
+3. GPU-accelerated vector search.
+4. Replication.
+5. Authentication and authorization.
+6. Query optimizer cost estimation.
+7. Streaming ingestion.
 
-1. Unit tests for contracts and parsing.
-2. Filesystem-backed tests for persistence and recovery.
-3. Integration tests for end-to-end behavior.
-4. Benchmarks only after correctness is stable.
+---
 
-## Explicit Non-Goals Until v0.1
+## v0.1 Target
 
-Until the storage and recovery core is trustworthy, the following are explicitly out of scope:
+v0.1 is complete when:
 
-1. SQL execution.
-2. Persistent table metadata beyond the current directory layout.
-3. Networking and server behavior.
-4. Vector indexing and ANN search.
-5. GPU acceleration.
-6. CXL-aware data placement or execution.
-7. AI inference or embedding execution APIs.
-8. Concurrency features that arrive before single-threaded correctness.
-9. Performance tuning that weakens determinism or durability.
-10. Spill, migration, or placement heuristics across hot, warm, and cold tiers.
+1. Binary segment format is defined, encoded, and round-trip tested.
+2. A segment can be written to and read from local disk (object storage client abstracted).
+3. Inverted index is built per-segment and queried correctly.
+4. A simple SQL query (`SELECT ... WHERE ...`) executes against an in-process segment store.
+5. A JSON filter query executes over the same segments.
+6. All correctness tests pass.
 
-## Legitimate v0.1 Target
-
-The next legitimate milestone is not broader capability. It is a trustworthy storage baseline.
-
-v0.1 should mean:
-
-1. A concrete WAL record format exists.
-2. Writes are committed only after WAL durability.
-3. Crash and restart behavior is specified and tested.
-4. Recovery from empty storage, valid WAL-only state, and snapshot-plus-WAL state is deterministic.
-5. Corrupt or partial WAL and snapshot cases are rejected safely.
-
-If those properties are not true, higher-level features are premature.
+---
 
 ## Change Control
 
 When the architecture changes:
 
-1. Update this document.
-2. Update any supporting architecture notes and agent instructions that define the same invariants.
-3. Keep claims aligned with the actual codebase state.
-
-If code and documentation disagree, documentation is not a license to continue. Reconcile the mismatch first.
+1. Update this document first.
+2. Update AGENTS.md if build order or module boundaries change.
+3. Keep claims aligned with actual codebase state.
+4. If code and documentation disagree, reconcile before building further.

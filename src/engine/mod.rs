@@ -1,30 +1,20 @@
-use anyhow::Result;
+//! Execution engine: the single coordinator across storage, index, and query.
+//!
+//! Responsibilities:
+//! - Write path: accept ingest, buffer rows, flush to a segment, commit to
+//!   object storage, update catalog.
+//! - Read path: resolve query to segments, run per-segment index lookups,
+//!   fetch and decode matching rows, merge and rank results.
+//! - Merge coordinator: background task that merges small segments into
+//!   larger ones and soft-deletes the source segments post-verification.
+//!
+//! Boundary rules:
+//! - The engine is the only layer allowed to coordinate across storage,
+//!   index, and query.
+//! - It does not expose raw storage or index types to callers; it answers
+//!   typed result sets.
 
-use crate::core::config::AppConfig;
-use crate::storage::{StorageLayout, StorageManager};
+pub mod read;
+pub mod write;
 
-pub struct Engine {
-    config: AppConfig,
-    layout: StorageLayout,
-}
-
-impl Engine {
-    pub fn open(config: AppConfig) -> Result<Self> {
-        let layout = StorageManager::prepare(&config.data_dir)?;
-        Ok(Self { config, layout })
-    }
-
-    pub fn layout(&self) -> &StorageLayout {
-        &self.layout
-    }
-
-    pub fn describe(&self) -> String {
-        format!(
-            "AetherDB {}\nmode: foundation\ndata dir: {}\nwal dir: {}\nsnapshots dir: {}\nnext milestone: durable WAL + recovery tests",
-            env!("CARGO_PKG_VERSION"),
-            self.config.data_dir.display(),
-            self.layout.wal.display(),
-            self.layout.snapshots.display(),
-        )
-    }
-}
+// TODO (Week 19-22): implement EngineHandle, WriteCoordinator, ReadExecutor.
