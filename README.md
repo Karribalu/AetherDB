@@ -11,7 +11,7 @@ This README is written using the following assumptions:
 1. AetherDB is intended to become a single-node, AI-native database before it grows into anything larger.
 2. The project values Tiger Style engineering more than shipping flashy features early.
 3. The near-term goal is a real MVP, not a prototype that collapses under crash or restart.
-4. The current repository is still in foundation mode and has not yet implemented durable WAL or recovery.
+4. The current repository is still in foundation mode and has not yet implemented the durable segment codec, storage layers, or recovery behavior around immutable segments.
 
 If any of these assumptions change, this README should change with them.
 
@@ -34,10 +34,10 @@ AetherDB is aiming toward the following end state:
 2. Tables that can store both standard columns and native vector columns.
 3. A hot, warm, and cold storage model:
    RAM for active working state.
-   Memory-mapped warm tier for large working sets and future CXL-style expansion.
-   Snapshot-backed cold tier for durable recovery.
+   NVMe-backed warm cache for large working sets.
+   Object-storage-backed cold tier as the source of truth.
 4. CPU-correct reference implementations first, with GPU acceleration later.
-5. Durable persistence through WAL plus snapshots.
+5. Durable persistence through immutable segments stored in object storage.
 6. A simple server and CLI surface that stays understandable while the engine matures.
 
 ## Tiger Style Philosophy
@@ -58,9 +58,9 @@ Tiger Style in this repository means:
 
 The architectural direction for AetherDB is intentionally staged.
 
-1. The WAL is the source of truth between snapshots.
-2. Recovery must be deterministic.
-3. Snapshots are an optimization, not the primary authority.
+1. Object storage is the source of truth for committed segments.
+2. Recovery must be deterministic from the catalog plus segment objects.
+3. NVMe cache is an optimization, not the primary authority.
 4. Warm-tier and hardware-aware ideas must not bypass storage correctness.
 5. SQL, vector search, networking, and acceleration all sit on top of a reliable storage core, not the other way around.
 
@@ -68,8 +68,10 @@ Current module boundaries:
 
 1. `cli` for command entrypoints.
 2. `core` for shared configuration and telemetry.
-3. `engine` for orchestration.
-4. `storage` for filesystem layout, WAL, snapshots, and persistence semantics.
+3. `catalog` for namespace and segment manifests.
+4. `storage` for object storage and NVMe cache semantics.
+5. `codec` for segment binary format and metadata encoding.
+6. `engine` for orchestration.
 
 ## Why This Exists
 
@@ -89,18 +91,18 @@ The repository is in Day 1 foundation mode.
 What exists today:
 
 1. A Rust crate with a minimal CLI.
-2. A local data directory layout with `catalog`, `wal`, and `snapshots` directories.
-3. Architecture rules captured in [AGENTS.md](/Users/balasubramanyam/open-source/aetherdb/AGENTS.md) and [docs/architecture/day-01-foundation.md](/Users/balasubramanyam/open-source/aetherdb/docs/architecture/day-01-foundation.md).
+2. Crate boundaries for `cli`, `core`, `catalog`, `storage`, `codec`, `index`, `query`, `engine`, and `server`.
+3. Architecture rules captured in [AGENTS.md](/Users/balasubramanyam/open-source/aetherdb/AGENTS.md) and [Architecture.md](/Users/balasubramanyam/open-source/aetherdb/Architecture.md).
 
 What does not exist yet:
 
-1. Durable WAL records.
-2. Snapshot recovery.
-3. Table persistence.
-4. SQL execution.
-5. Vector indexing.
-6. Networking.
-7. GPU or CXL integration.
+1. Durable segment header and footer encoding.
+2. Local and object-backed segment storage.
+3. Catalog update protocol.
+4. Index implementations.
+5. Query execution.
+6. HTTP serving.
+7. GPU or distributed features.
 
 That gap is intentional. The project is being built in the order most likely to produce a durable system rather than a fragile showcase.
 
@@ -108,13 +110,13 @@ That gap is intentional. The project is being built in the order most likely to 
 
 The intended implementation order is:
 
-1. Storage invariants.
-2. Recovery semantics.
-3. Data model correctness.
-4. Query execution correctness.
-5. Concurrency correctness.
-6. Performance optimization.
-7. GPU and CXL-aware features.
+1. Codec.
+2. Storage.
+3. NVMe cache.
+4. Catalog.
+5. Index correctness.
+6. Engine write and read paths.
+7. Query layers, then server.
 
 This order is part of the design, not a temporary preference.
 
@@ -123,24 +125,24 @@ This order is part of the design, not a temporary preference.
 Current commands:
 
 ```bash
-cargo run -- start
+cargo run -- serve
 cargo run -- info
 cargo test
 ```
 
-The current binary initializes the local data directory and reports the project state. It is not yet a full database server.
+The current binary reports project information and reserves the server entrypoint for a later milestone. It is not yet a functional database server.
 
 ## Near-Term Goal
 
-The next legitimate milestone is not “more features.” It is durable WAL plus recovery tests.
+The next legitimate milestone is not “more features.” It is defining the durable segment format and its metadata invariants.
 
-Until restart behavior is trustworthy, everything else is downstream complexity.
+Until segment encoding and storage invariants are trustworthy, everything else is downstream complexity.
 
 ## Contributing
 
 If you contribute to AetherDB, read these first:
 
 1. [AGENTS.md](/Users/balasubramanyam/open-source/aetherdb/AGENTS.md)
-2. [docs/architecture/day-01-foundation.md](/Users/balasubramanyam/open-source/aetherdb/docs/architecture/day-01-foundation.md)
+2. [Architecture.md](/Users/balasubramanyam/open-source/aetherdb/Architecture.md)
 
 If code and docs disagree, stop and reconcile them before adding more code.

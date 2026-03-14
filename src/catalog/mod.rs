@@ -10,5 +10,6 @@
 //! Local cache holds a copy; it is always subordinate to the object storage
 //! version. On conflict the object storage version wins.
 
-// TODO (Week 8): implement CatalogEntry, SchemaDef, SegmentMeta, and the
-// compare-and-swap catalog update protocol.
+// TODO (Week 8): implement catalog manifests by reusing `codec` metadata types
+// for namespace, schema, and segment descriptors plus a compare-and-swap
+// catalog update protocol.

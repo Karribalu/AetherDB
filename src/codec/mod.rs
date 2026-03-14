@@ -26,5 +26,17 @@
 //! - Delta-encoded doc ID lists.
 //! - Little-endian fixed-width integers for lengths and offsets.
 
-// TODO (Phase 1 – Week 3-4): implement SegmentHeader, varint encode/decode,
-// delta encoding, and round-trip tests.
+//! The first concrete segment object model lives in `metadata` and defines the
+//! namespace, schema, field, and segment descriptors that later header/footer
+//! encoding will serialize.
+
+pub mod metadata;
+
+#[allow(unused_imports)]
+pub use metadata::{
+    FieldIndexKind, FieldMetadata, FieldStatistics, FieldType, FieldValue, NamespaceMetadata,
+    SchemaFingerprint, SchemaMetadata, SegmentFieldMetadata, SegmentMetadata, VectorDistanceMetric,
+};
+
+// TODO (Phase 1 – Week 2-4): implement SegmentHeader, varint encode/decode,
+// delta encoding, binary metadata serialization, and round-trip tests.

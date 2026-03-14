@@ -69,6 +69,17 @@ Every write operation produces a new immutable segment. A segment contains:
 
 A segment is immutable once written. It is never modified in place.
 
+### Segment Object Model
+
+The first concrete metadata model for segments is split into four concepts:
+
+1. **Namespace metadata** identifies the logical collection exposed to clients and anchors the active schema.
+2. **Schema metadata** is versioned and fingerprinted. It contains an ordered list of field descriptors with stable field IDs.
+3. **Field metadata** defines field name, logical type, nullability, storage behavior, and declared index kinds.
+4. **Segment metadata** binds an immutable segment to one namespace and one exact schema fingerprint, and records row count, byte size, object storage key, and per-field statistics.
+
+This model is intentionally limited to durable storage facts. Query planning, execution policy, and cache state are not part of the segment object model.
+
 ### Object Storage as Source of Truth
 
 1. All committed segments must be durably written to object storage before a write is acknowledged.
