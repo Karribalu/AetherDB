@@ -8,15 +8,11 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────┐
-//! │  Magic bytes  (8 bytes)  "AETHERDB"                     │
-//! │  Version      (1 byte)   format version                 │
-//! │  Header       (variable) SegmentHeader encoded as bytes  │
-//! │  Column data  (variable) columnar row data               │
-//! │  Inverted idx (variable) inverted index postings         │
-//! │  BKD tree     (variable) numeric range index             │
-//! │  Bitmap idx   (variable) low-cardinality field bitmaps   │
-//! │  HNSW graph   (variable) vector similarity index         │
-//! │  Footer CRC32 (4 bytes)  crc32 of everything above      │
+//! │  Preamble     (fixed)    magic, version, header sizing   │
+//! │  Header       (variable) open-time segment metadata      │
+//! │  Body         (variable) column and index regions        │
+//! │  Footer       (variable) region directory and metadata   │
+//! │  Footer CRC32 (4 bytes)  crc32 of footer payload         │
 //! └─────────────────────────────────────────────────────────┘
 //! ```
 //!

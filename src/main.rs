@@ -1,15 +1,5 @@
-mod catalog;
-mod cli;
-mod codec;
-mod core;
-mod engine;
-mod index;
-mod query;
-mod server;
-mod storage;
-
+use aetherdb::cli::{Cli, Command};
 use clap::Parser;
-use cli::{Cli, Command};
 
 fn main() {
     tracing_subscriber::fmt::init();
