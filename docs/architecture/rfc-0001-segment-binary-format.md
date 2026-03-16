@@ -81,6 +81,14 @@ Each segment file has four logical parts:
 └──────────────────────────────────────────────────────────────┘
 ```
 
+In concrete `v1alpha1` terms, the outer envelope is:
+
+1. A fixed 25-byte preamble.
+2. A variable-size header whose byte length is recorded in the preamble.
+3. A variable-size body of opaque regions.
+4. A variable-size footer payload.
+5. A fixed 4-byte footer trailer containing the footer CRC32.
+
 Concrete read order:
 
 1. Read the preamble.
@@ -114,6 +122,8 @@ The preamble is intentionally simple. It exists to answer three questions immedi
 3. How many bytes must be read to decode the header?
 
 If any reserved bits are non-zero in `v1alpha1`, the reader must reject the segment as unsupported.
+
+The preamble therefore has a fixed encoded length of 25 bytes in `v1alpha1`.
 
 ## Header
 
@@ -151,6 +161,8 @@ The header must encode the following logical fields:
 2. The header must not include mutable storage-state concepts such as cache location or query-planning hints.
 3. The header must be sufficient to fail early if the namespace or schema fingerprint does not match what the catalog expects.
 4. `footer_offset` must point to the first byte of the footer payload, not the checksum trailer.
+5. `field_count` must exactly match the number of encoded field descriptors.
+6. `footer_offset` must be greater than or equal to `preamble_size + header_len`.
 
 ### Why Schema Lives In The Header
 
@@ -214,7 +226,8 @@ The footer must contain:
 The footer payload includes two logical parts:
 
 1. `segment_metadata`: the durable `SegmentMetadata` structure, including `SegmentFieldMetadata` and field statistics.
-2. `region_directory`: a list of region descriptors.
+2. `region_count`: the exact number of region directory entries.
+3. `region_directory`: a list of region descriptors.
 
 ### Region Directory Entry
 
@@ -237,6 +250,8 @@ Each region directory entry must encode at least:
 4. Directory entries must be sorted by ascending `offset`.
 5. `SegmentMetadata.size_bytes` must equal the actual file size.
 6. `SegmentFieldMetadata.bytes_on_disk` must reconcile with the sum of directory entries attributed to that field.
+7. Footer metadata must agree with the header for `segment_id`, `namespace`, `schema_id`, `schema_fingerprint`, and `row_count`.
+8. Region entries for field-scoped payloads must reference a known `field_id` from `SegmentMetadata.fields`.
 
 ### Why Metadata Lives In The Footer
 
@@ -245,6 +260,8 @@ Each region directory entry must encode at least:
 ## Footer Checksum
 
 The final 4 bytes of the file are a CRC32 of the footer payload only.
+
+Those 4 bytes are a fixed trailer and are not part of the footer payload length itself.
 
 This does not replace per-region checksums. It serves a narrower purpose:
 

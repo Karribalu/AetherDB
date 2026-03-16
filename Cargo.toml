@@ -3,10 +3,6 @@ name = "aetherdb"
 version = "0.1.0"
 edition = "2024"
 
-[[bench]]
-name = "metadata_validation"
-harness = false
-
 # ── Runtime ──────────────────────────────────────────────────────────────────
 [dependencies]
 tokio = { version = "1", features = ["full"] }

@@ -1,12 +1,3 @@
-//! CLI entry point: argument parsing and command dispatch.
-//!
-//! Commands:
-//! - `aetherdb serve` — start the HTTP server.
-//! - `aetherdb info` — print version and config.
-//!
-//! The CLI has no storage, index, or query logic. It delegates immediately
-//! to the engine or server module.
-
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
