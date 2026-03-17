@@ -7,12 +7,14 @@ name = "aetherdb"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "bytes",
  "chrono",
  "clap",
  "crc32fast",
  "criterion",
+ "futures",
  "object_store",
  "proptest",
  "serde",

@@ -26,8 +26,8 @@ The system targets:
 1. The file belongs at the repository root.
 2. The design is inspired by turbopuffer and Lucene's segment model, but built independently.
 3. All index structures are built from scratch in Rust. No Lucene, Tantivy, or FAISS.
-4. The module structure is: `cli`, `core`, `catalog`, `storage`, `codec`, `index`, `query`, `engine`, `server`.
-5. The repository is in foundation mode with crate/module scaffolding in place but no subsystem implementations yet.
+4. The intended module boundaries are: `cli`, `core`, `catalog`, `storage`, `codec`, `index`, `query`, `engine`, `server`.
+5. The repository is in foundation mode: only a minimal CLI surface is implemented, and subsystem crates/modules are still to be added.
 
 ## Tiger Style
 
@@ -205,11 +205,13 @@ An agent must not:
 
 ## Current State
 
-The repository now has the top-level crate structure and stub modules for `cli`, `core`, `catalog`, `storage`, `codec`, `index`, `query`, `engine`, and `server`.
+The repository currently exposes only `cli` (`src/cli/mod.rs`) through `src/lib.rs`, plus the binary entrypoint in `src/main.rs`.
 
-Those modules define boundaries and implementation notes only. No storage engine, catalog protocol, index implementation, planner, or server behavior exists yet.
+Current runnable workflow is limited to `cargo run -- info`, `cargo run -- serve` (placeholder; server not implemented), and `cargo test`.
 
-The next legitimate step is still defining the `codec` module concretely: segment header, binary layout, offsets, checksums, and round-trip tests.
+No storage engine, catalog protocol, index implementation, planner, or server behavior exists yet.
+
+The next legitimate step is still defining the `codec` module concretely: segment header, binary layout, offsets, checksums, and round-trip tests, following `docs/architecture/rfc-0001-segment-binary-format.md` as the current proposed format contract.
 
 Do not build anything else first.
 
