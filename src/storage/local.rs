@@ -3,10 +3,10 @@ use crate::storage::{Storage, StorageError, StorageResult};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::TryStreamExt;
-use std::io::Write;
+use std::io::{SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 pub struct LocalStorage {
     uri: String,
@@ -36,7 +36,6 @@ impl Storage for LocalStorage {
         let parent_dir = full_path.parent().ok_or_else(|| {
             StorageError::Internal(format!("no parent directory for ${full_path:?}"))
         })?;
-
         tokio::fs::create_dir_all(parent_dir).await?;
         let named_temp_file = tempfile::NamedTempFile::new_in(parent_dir)?;
         let mut stream = data.byte_stream().await?;
@@ -56,12 +55,28 @@ impl Storage for LocalStorage {
         Ok(())
     }
 
-    async fn get_slice(&self, path: &Path, range: Range<usize>) -> StorageResult<Bytes> {
-        todo!()
+    async fn get(&self, path: &Path) -> StorageResult<Bytes> {
+        let full_path = self.full_path(path)?;
+        let content = tokio::fs::read(full_path).await?;
+
+        Ok(Bytes::from(content))
     }
 
-    async fn get(&self, path: &Path) -> StorageResult<Bytes> {
-        todo!()
+    async fn get_slice(&self, path: &Path, range: Range<usize>) -> StorageResult<Bytes> {
+        if range.start > range.end {
+            return Err(StorageError::Io(format!(
+                "invalid range: start {} is greater than end {}",
+                range.start, range.end
+            )));
+        }
+
+        let full_path = self.full_path(path)?;
+        let mut file = tokio::fs::File::open(full_path).await?;
+        file.seek(SeekFrom::Start(range.start as u64)).await?;
+        let mut content_bytes = vec![0u8; range.len()];
+        file.read_exact(&mut content_bytes).await?;
+
+        Ok(Bytes::from(content_bytes))
     }
 }
 
@@ -195,5 +210,112 @@ mod tests {
 
         let result = storage.put(Path::new("../escape"), Box::new(payload)).await;
         assert!(matches!(result, Err(StorageError::Unauthorized(_))));
+    }
+
+    #[tokio::test]
+    async fn get_reads_back_existing_file() {
+        let tempdir = tempfile::tempdir().expect("create temp dir");
+        let root = tempdir.path().join("storage-root");
+        let storage = make_storage(root.clone());
+
+        let relative_path = Path::new("segments/000001/full.bin");
+        let expected = Bytes::from_static(b"full file content");
+        let full_path = root.join(relative_path);
+        std::fs::create_dir_all(full_path.parent().expect("parent directory")).expect("create parent");
+        std::fs::write(&full_path, &expected).expect("write file");
+
+        let actual = storage.get(relative_path).await.expect("get should succeed");
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn get_returns_not_found_for_missing_file() {
+        let tempdir = tempfile::tempdir().expect("create temp dir");
+        let root = tempdir.path().join("storage-root");
+        let storage = make_storage(root);
+
+        let result = storage.get(Path::new("segments/missing.bin")).await;
+        assert!(matches!(result, Err(StorageError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn get_rejects_forbidden_relative_path() {
+        let tempdir = tempfile::tempdir().expect("create temp dir");
+        let root = tempdir.path().join("storage-root");
+        let storage = make_storage(root);
+
+        let result = storage.get(Path::new("../escape")).await;
+        assert!(matches!(result, Err(StorageError::Unauthorized(_))));
+    }
+
+    #[tokio::test]
+    async fn get_slice_reads_requested_range() {
+        let tempdir = tempfile::tempdir().expect("create temp dir");
+        let root = tempdir.path().join("storage-root");
+        let storage = make_storage(root.clone());
+
+        let relative_path = Path::new("segments/000001/slice.bin");
+        let full_path = root.join(relative_path);
+        std::fs::create_dir_all(full_path.parent().expect("parent directory")).expect("create parent");
+        std::fs::write(&full_path, b"abcdefghij").expect("write file");
+
+        let actual = storage
+            .get_slice(relative_path, 2..7)
+            .await
+            .expect("get_slice should succeed");
+        assert_eq!(actual, Bytes::from_static(b"cdefg"));
+    }
+
+    #[tokio::test]
+    async fn get_slice_returns_error_for_out_of_bounds_range() {
+        let tempdir = tempfile::tempdir().expect("create temp dir");
+        let root = tempdir.path().join("storage-root");
+        let storage = make_storage(root.clone());
+
+        let relative_path = Path::new("segments/000001/slice_oob.bin");
+        let full_path = root.join(relative_path);
+        std::fs::create_dir_all(full_path.parent().expect("parent directory")).expect("create parent");
+        std::fs::write(&full_path, b"abc").expect("write file");
+
+        let result = storage.get_slice(relative_path, 1..10).await;
+        assert!(matches!(result, Err(StorageError::Io(_))));
+    }
+
+    #[tokio::test]
+    async fn get_slice_returns_empty_for_empty_range() {
+        let tempdir = tempfile::tempdir().expect("create temp dir");
+        let root = tempdir.path().join("storage-root");
+        let storage = make_storage(root.clone());
+
+        let relative_path = Path::new("segments/000001/empty_range.bin");
+        let full_path = root.join(relative_path);
+        std::fs::create_dir_all(full_path.parent().expect("parent directory")).expect("create parent");
+        std::fs::write(&full_path, b"abcdef").expect("write file");
+
+        let actual = storage
+            .get_slice(relative_path, 3..3)
+            .await
+            .expect("empty range should succeed");
+        assert!(actual.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_slice_rejects_forbidden_relative_path() {
+        let tempdir = tempfile::tempdir().expect("create temp dir");
+        let root = tempdir.path().join("storage-root");
+        let storage = make_storage(root);
+
+        let result = storage.get_slice(Path::new("../escape"), 0..1).await;
+        assert!(matches!(result, Err(StorageError::Unauthorized(_))));
+    }
+
+    #[tokio::test]
+    async fn get_slice_rejects_invalid_reversed_range() {
+        let tempdir = tempfile::tempdir().expect("create temp dir");
+        let root = tempdir.path().join("storage-root");
+        let storage = make_storage(root);
+
+        let result = storage.get_slice(Path::new("segments/file.bin"), 4..1).await;
+        assert!(matches!(result, Err(StorageError::Io(_))));
     }
 }
